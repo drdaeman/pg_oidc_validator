@@ -77,7 +77,7 @@ psql 'host=127.0.0.1 dbname=name user=rolename oauth_issuer=http://127.0.0.1:808
 ### Microsoft / Entra ID
 * `oauth_issuer` for postgres should be `https://login.microsoftonline.com/<tenant_id>/v2.0`
 * It generates different JWTs for providers without custom scopes and with custom scopes.
-  The library can only validate JWTs with custom scopes, only use the short name without URI schema and UUID in the `scope` parameter in `pg_hba.conf`
+  The library can only validate JWTs with custom scopes; use the full scope name (api://<application id>/<scope name>) in the `scope` parameter in `pg_hba.conf`
 
 ## Google OIDC
 Google has some quirks which are currently not supported by the core PostgreSQL oauth code. So for now this extension can unfortunately not support it.
