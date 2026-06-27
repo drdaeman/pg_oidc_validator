@@ -120,26 +120,40 @@ std::string get_required_parameter(picojson::object const& key_object, std::stri
 }
 
 jwt_verifier configure_verifier_with_jwks(const std::string& issuer, const picojson::value& jwksInfo,
-                                          const std::string& required_kid) {
-  std::string expected_issuer = issuer;
+                                          const std::string& required_kid, bool validate_issuer) {
+  auto verifier = jwt::verify();
 
-  if (issuer_is_azure(issuer)) {
-    // Microsoft flow is tricky
-    // JWTs contain issuer referring to sts.windows.net, but device flow only
-    // works correctly with login.microsoftonline.com/v2
-    // we have to be aware of this and add custom issuer to the verifier
-    elog(DEBUG1, "Detected Azure issuer, will use custom issuer validation");
-    expected_issuer = convert_azure_issuer_to_jwt_format(issuer);
+  if (validate_issuer) {
+    std::string expected_issuer = issuer;
+
+    if (issuer_is_azure(issuer)) {
+      // Microsoft flow is tricky
+      // JWTs contain issuer referring to sts.windows.net, but device flow only
+      // works correctly with login.microsoftonline.com/v2
+      // we have to be aware of this and add custom issuer to the verifier
+      elog(DEBUG1, "Detected Azure issuer, will use custom issuer validation");
+      expected_issuer = convert_azure_issuer_to_jwt_format(issuer);
+    }
+
+    verifier = verifier.with_issuer(expected_issuer);
   }
-
-  auto verifier = jwt::verify().with_issuer(expected_issuer);
 
   if (!jwksInfo.is<picojson::object>()) {
     throw std::runtime_error("JWKS info is not a JSON object");
   }
 
   const auto& jwks_object = jwksInfo.get<picojson::object>();
-  const auto keys = jwks_object.at("keys").get<picojson::array>();
+
+  picojson::array keys;
+  if (jwks_object.contains("keys")) {
+    keys = jwks_object.at("keys").get<picojson::array>();
+  } else if (jwks_object.contains("kty")) {
+    keys.push_back(jwksInfo);
+  } else {
+    throw std::runtime_error("JWKS info has neither a 'keys' array nor a 'kty' (not a JWK Set or JWK)");
+  }
+
+  const bool single_key = keys.size() == 1;
 
   for (const auto& key_value : keys) {
     if (!key_value.is<picojson::object>()) {
@@ -148,16 +162,22 @@ jwt_verifier configure_verifier_with_jwks(const std::string& issuer, const picoj
 
     const auto& key_object = key_value.get<picojson::object>();
 
-    const std::string use = get_required_parameter(key_object, "use");
+    const std::string use = key_object.contains("use") ? key_object.at("use").to_str() : "";
 
-    if (use != "sig") {
+    if (!use.empty() && use != "sig") {
       continue;
     }
 
-    const std::string kid = get_required_parameter(key_object, "kid");
+    const std::string kid = key_object.contains("kid") ? key_object.at("kid").to_str() : "";
 
-    if (kid != required_kid) {
-      // Skip keys that don't match the required key ID
+    bool matches;
+    if (!kid.empty() && !required_kid.empty()) {
+      matches = (kid == required_kid);
+    } else {
+      matches = single_key;
+    }
+
+    if (!matches) {
       continue;
     }
 

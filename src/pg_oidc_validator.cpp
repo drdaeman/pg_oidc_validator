@@ -29,11 +29,28 @@ const OAuthValidatorCallbacks* _PG_oauth_validator_module_init(void) { return &v
 }
 
 static char* authn_field = nullptr;
+static char* static_jwks = nullptr;
+static bool validate_issuer_guc = true;
 
 extern "C" void _PG_init() {
   DefineCustomStringVariable("pg_oidc_validator.authn_field",
                              gettext_noop("OAuth field used for matching PostgreSQL users"), nullptr, &authn_field,
                              "sub", PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
+
+  DefineCustomStringVariable(
+      "pg_oidc_validator.jwks",
+      gettext_noop("Static JWKS (or single JWK) JSON used to verify tokens offline"),
+      gettext_noop("When set, the signing keys are taken from this value and no issuer discovery or "
+                   "JWKS HTTP request is performed. Empty (the default) keeps the usual behavior of "
+                   "fetching keys from the issuer's .well-known/openid-configuration."),
+      &static_jwks, "", PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
+
+  DefineCustomBoolVariable(
+      "pg_oidc_validator.validate_issuer",
+      gettext_noop("Validate the token's 'iss' claim against the configured issuer"),
+      gettext_noop("Only consulted when pg_oidc_validator.jwks is set. In the default HTTP discovery "
+                   "mode the issuer is always validated."),
+      &validate_issuer_guc, true, PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
 }
 
 bool validate_token(const ValidatorModuleState* state, const char* token, const char* role,
@@ -42,44 +59,59 @@ bool validate_token(const ValidatorModuleState* state, const char* token, const 
   res->authn_id = nullptr;
   res->authorized = false;
 
-  try {
-    pg::pg_try([&]() { pg::http_cache::get_instance().attach(); });
-  } catch (const pg::postgres_exception& ex) {
-    elog(WARNING, "Failed to attach to HTTP cache: %s", ex.what());
-  }
-
   auto required_scopes_range = std::string(MyProcPort->hba->oauth_scope) | std::views::split(' ') |
                                std::views::transform([](auto r) { return std::string(r.data(), r.size()); });
 
   const scopes_t required_scopes(required_scopes_range.begin(), required_scopes_range.end());
   const std::string issuer = MyProcPort->hba->oauth_issuer;
 
-  http_client http;
-  const auto issuer_info = http.get_json(issuer_info_url(issuer));
-
-  if (!issuer_info.is<picojson::object>()) {
-    elog(WARNING, "OpenID configuration from issuer is not a JSON object");
-    return false;
-  }
-
-  const auto& issuer_object = issuer_info.get<picojson::object>();
-
-  if (!issuer_object.contains("jwks_uri")) {
-    elog(WARNING, "jwks_uri not present in issuer info. Is this an OIDC provider?");
-    return false;
-  }
-
-  const auto jwks_uri = issuer_object.at("jwks_uri").to_str();
-
-  if (jwks_uri.empty()) {
-    elog(WARNING, "Could not parse JWKS URI from issuer configuration");
-    return false;
-  }
-
-  const auto jwks_info = http.get_json(jwks_uri);
   const auto decoded_token = jwt::decode(token);
-  const std::string jwt_kid = decoded_token.get_header_claim("kid").as_string();
-  const auto verifier = configure_verifier_with_jwks(issuer, jwks_info, jwt_kid);
+  const std::string jwt_kid =
+      decoded_token.has_header_claim("kid") ? decoded_token.get_header_claim("kid").as_string() : "";
+
+  const jwt_verifier verifier = [&]() -> jwt_verifier {
+    if (static_jwks != nullptr && static_jwks[0] != '\0') {
+      // Static / offline mode: signing keys come straight from the GUC, so no
+      // issuer discovery or JWKS HTTP request happens. Fail closed on a
+      // malformed value -- never fall back to network discovery.
+      picojson::value jwks_value;
+      const std::string parse_err = picojson::parse(jwks_value, std::string(static_jwks));
+      if (!parse_err.empty()) {
+        throw std::runtime_error("Failed to parse pg_oidc_validator.jwks GUC: " + parse_err);
+      }
+      return configure_verifier_with_jwks(issuer, jwks_value, jwt_kid, validate_issuer_guc);
+    }
+
+    // HTTP discovery mode: fetch the issuer configuration and the JWKS from it.
+    try {
+      pg::pg_try([&]() { pg::http_cache::get_instance().attach(); });
+    } catch (const pg::postgres_exception& ex) {
+      elog(WARNING, "Failed to attach to HTTP cache: %s", ex.what());
+    }
+
+    http_client http;
+    const auto issuer_info = http.get_json(issuer_info_url(issuer));
+
+    if (!issuer_info.is<picojson::object>()) {
+      throw std::runtime_error("OpenID configuration from issuer is not a JSON object");
+    }
+
+    const auto& issuer_object = issuer_info.get<picojson::object>();
+
+    if (!issuer_object.contains("jwks_uri")) {
+      throw std::runtime_error("jwks_uri not present in issuer info. Is this an OIDC provider?");
+    }
+
+    const auto jwks_uri = issuer_object.at("jwks_uri").to_str();
+
+    if (jwks_uri.empty()) {
+      throw std::runtime_error("Could not parse JWKS URI from issuer configuration");
+    }
+
+    const auto jwks_info = http.get_json(jwks_uri);
+    return configure_verifier_with_jwks(issuer, jwks_info, jwt_kid, /*validate_issuer=*/true);
+  }();
+
   verifier.verify(decoded_token);
   auto received_scopes = parse_jwt_scopes(decoded_token.get_payload_json()["scp"]);
   const auto json_scope = parse_jwt_scopes(decoded_token.get_payload_json()["scope"]);

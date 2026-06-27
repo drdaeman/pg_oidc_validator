@@ -49,6 +49,23 @@ In some cases however the `sub` claim is fixed to a randomly generated, applicat
 This is not practical for mapping provider users to PostgreSQL users in a map file.
 Selecting a different `authn_field`, such as `email` allows an easy to use persistent mapping in this case.
 
+### pg_oidc_validator.jwks
+
+By default the validator discovers the token signing keys at runtime: it fetches
+`<issuer>/.well-known/openid-configuration`, reads `jwks_uri`, and downloads the JWKS over HTTP.
+
+Set this GUC to the JSON a JWKS endpoint would return (a `{"keys":[...]}` object, or a single JWK) to
+supply the signing keys directly. `kid` and `use` are optional on the key, a single static JWK is used even without them.
+With multiple keys, the token's `kid` selects the matching one.
+
+When it is non-empty, no HTTP requests performed: neither the `.well-known` discovery nor the JWKS download.
+Leaving this empty (the default) keeps the usual HTTP discovery behavior.
+
+### pg_oidc_validator.validate_issuer
+
+Whether to verify the token's `iss` claim against the `issuer=` configured in `pg_hba.conf`. Defaults to `on`.
+This is only used when `pg_oidc_validator.jwks` is set - in HTTP discovery mode the issuer is the trust anchor and is always validated.
+
 ## Usage
 
 Use a connection string with OAuth to connect to the server. Currently only `libpq` clients will support OAuth.
