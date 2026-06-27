@@ -2,6 +2,9 @@
 *.o
 *.so
 
+# Nix / direnv
+/.direnv/
+
 # RPM packaging artifacts
 /packaging/rpm/output/
 /packaging/rpm/pg_oidc_validator-test.rpm
