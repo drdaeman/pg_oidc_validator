@@ -112,6 +112,56 @@ void configure_hmac_key(const picojson::object& keyObject, const std::string& ki
   }
 }
 
+void configure_okp_key(const picojson::object& keyObject, const std::string& kid, const std::string& alg,
+                       jwt_verifier& verifier) {
+  const auto crv_it = keyObject.find("crv");
+  const auto x_it = keyObject.find("x");
+
+  if (crv_it == keyObject.end() || x_it == keyObject.end()) {
+    throw std::runtime_error(std::format("OKP key missing required 'crv'/'x' components (kid: {})", kid));
+  }
+
+  if (!alg.empty() && alg != "EdDSA") {
+    throw std::runtime_error(std::format("Unsupported OKP algorithm: {} (kid: {})", alg, kid));
+  }
+
+  const std::string crv = crv_it->second.to_str();
+  const std::string raw =
+      jwt::base::decode<jwt::alphabet::base64url>(jwt::base::pad<jwt::alphabet::base64url>(x_it->second.to_str()));
+
+  // ASN.1 SubjectPublicKeyInfo prefixes for the Edwards-curve OIDs (RFC 8410).
+  std::string spki;
+  if (crv == "Ed25519") {
+    static const unsigned char prefix[] = {0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00};
+    if (raw.size() != 32) {
+      throw std::runtime_error(std::format("Ed25519 key 'x' must be 32 bytes, got {} (kid: {})", raw.size(), kid));
+    }
+    spki.assign(reinterpret_cast<const char*>(prefix), sizeof(prefix));
+  } else if (crv == "Ed448") {
+    static const unsigned char prefix[] = {0x30, 0x43, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x71, 0x03, 0x3a, 0x00};
+    if (raw.size() != 57) {
+      throw std::runtime_error(std::format("Ed448 key 'x' must be 57 bytes, got {} (kid: {})", raw.size(), kid));
+    }
+    spki.assign(reinterpret_cast<const char*>(prefix), sizeof(prefix));
+  } else {
+    throw std::runtime_error(std::format("Unsupported OKP curve: {} (kid: {})", crv, kid));
+  }
+
+  const std::string b64 = jwt::base::encode<jwt::alphabet::base64>(spki + raw);
+
+  std::string pem = "-----BEGIN PUBLIC KEY-----\n";
+  for (std::size_t i = 0; i < b64.size(); i += 64) {
+    pem += b64.substr(i, 64) + "\n";
+  }
+  pem += "-----END PUBLIC KEY-----\n";
+
+  if (crv == "Ed25519") {
+    verifier = verifier.allow_algorithm(jwt::algorithm::ed25519(pem));
+  } else {
+    verifier = verifier.allow_algorithm(jwt::algorithm::ed448(pem));
+  }
+}
+
 std::string get_required_parameter(picojson::object const& key_object, std::string const& name) {
   if (!key_object.contains(name)) {
     throw std::runtime_error(std::format("Required parameter '{}' is missing", name));
@@ -193,6 +243,8 @@ jwt_verifier configure_verifier_with_jwks(const std::string& issuer, const picoj
       configure_rsa_key(key_object, kid, alg, verifier);
     } else if (kty == "EC") {
       configure_ec_key(key_object, kid, alg, verifier);
+    } else if (kty == "OKP") {
+      configure_okp_key(key_object, kid, alg, verifier);
     } else if (kty == "oct") {
       configure_hmac_key(key_object, kid, alg, verifier);
     } else {
