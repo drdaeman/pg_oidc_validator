@@ -31,6 +31,7 @@ const OAuthValidatorCallbacks* _PG_oauth_validator_module_init(void) { return &v
 static char* authn_field = nullptr;
 static char* static_jwks = nullptr;
 static bool validate_issuer_guc = true;
+static char* audience_guc = nullptr;
 
 extern "C" void _PG_init() {
   DefineCustomStringVariable("pg_oidc_validator.authn_field",
@@ -51,6 +52,13 @@ extern "C" void _PG_init() {
       gettext_noop("Only consulted when pg_oidc_validator.jwks is set. In the default HTTP discovery "
                    "mode the issuer is always validated."),
       &validate_issuer_guc, true, PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
+
+  DefineCustomStringVariable(
+      "pg_oidc_validator.audience",
+      gettext_noop("Require the token's 'aud' claim to contain this value"),
+      gettext_noop("When set, tokens whose audience does not include this value are rejected, in both "
+                   "static and HTTP discovery modes. Empty (the default) disables the audience check."),
+      &audience_guc, "", PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
 }
 
 bool validate_token(const ValidatorModuleState* state, const char* token, const char* role,
@@ -64,6 +72,7 @@ bool validate_token(const ValidatorModuleState* state, const char* token, const 
 
   const scopes_t required_scopes(required_scopes_range.begin(), required_scopes_range.end());
   const std::string issuer = MyProcPort->hba->oauth_issuer;
+  const std::string audience = audience_guc != nullptr ? audience_guc : "";
 
   const auto decoded_token = jwt::decode(token);
   const std::string jwt_kid =
@@ -79,7 +88,7 @@ bool validate_token(const ValidatorModuleState* state, const char* token, const 
       if (!parse_err.empty()) {
         throw std::runtime_error("Failed to parse pg_oidc_validator.jwks GUC: " + parse_err);
       }
-      return configure_verifier_with_jwks(issuer, jwks_value, jwt_kid, validate_issuer_guc);
+      return configure_verifier_with_jwks(issuer, jwks_value, jwt_kid, validate_issuer_guc, audience);
     }
 
     // HTTP discovery mode: fetch the issuer configuration and the JWKS from it.
@@ -109,7 +118,7 @@ bool validate_token(const ValidatorModuleState* state, const char* token, const 
     }
 
     const auto jwks_info = http.get_json(jwks_uri);
-    return configure_verifier_with_jwks(issuer, jwks_info, jwt_kid, /*validate_issuer=*/true);
+    return configure_verifier_with_jwks(issuer, jwks_info, jwt_kid, /*validate_issuer=*/true, audience);
   }();
 
   verifier.verify(decoded_token);

@@ -66,6 +66,11 @@ Leaving this empty (the default) keeps the usual HTTP discovery behavior.
 Whether to verify the token's `iss` claim against the `issuer=` configured in `pg_hba.conf`. Defaults to `on`.
 This is only used when `pg_oidc_validator.jwks` is set - in HTTP discovery mode the issuer is the trust anchor and is always validated.
 
+### pg_oidc_validator.audience
+
+When set, the token's `aud` claim must contain this value, otherwise the token is rejected.
+Applies in both static and HTTP discovery modes. Empty (the default) disables the check.
+
 ## Usage
 
 Use a connection string with OAuth to connect to the server. Currently only `libpq` clients will support OAuth.

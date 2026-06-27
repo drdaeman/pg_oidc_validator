@@ -120,7 +120,8 @@ std::string get_required_parameter(picojson::object const& key_object, std::stri
 }
 
 jwt_verifier configure_verifier_with_jwks(const std::string& issuer, const picojson::value& jwksInfo,
-                                          const std::string& required_kid, bool validate_issuer) {
+                                          const std::string& required_kid, bool validate_issuer,
+                                          const std::string& audience) {
   auto verifier = jwt::verify();
 
   if (validate_issuer) {
@@ -136,6 +137,10 @@ jwt_verifier configure_verifier_with_jwks(const std::string& issuer, const picoj
     }
 
     verifier = verifier.with_issuer(expected_issuer);
+  }
+
+  if (!audience.empty()) {
+    verifier = verifier.with_audience(audience);
   }
 
   if (!jwksInfo.is<picojson::object>()) {
